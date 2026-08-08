@@ -1,0 +1,107 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- FastAPI / project runtime data ----
+uploaded_files/
+*.db
+*.sqlite3
+
+# ---- Alembic ----
+# (keep migration scripts, ignore only local scratch/version cache if any)
+alembic/versions/__pycache__/
+
+# ---- Testing / coverage ----
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# ---- Type checkers / linters ----
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+
+# ---- MLOps (MLflow, DVC) ----
+mlruns/
+mlflow.db
+.dvc/cache/
+.dvc/tmp/
+*.dvc.lock
+
+# ---- Docker ----
+*.pid
+
+# ---- IDE / editor ----
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- Frontend (React / TypeScript) ----
+node_modules/
+frontend/node_modules/
+frontend/build/
+frontend/dist/
+frontend/.env
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Terraform (if/when used) ----
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- OS ----
+.DS_Store
+desktop.ini
