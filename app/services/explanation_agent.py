@@ -54,3 +54,49 @@ def _sort_for_readability(result: list[dict]) -> list[dict]:
         return sorted(result, key=lambda row: row.get(sort_key, 0), reverse=True)
     except TypeError:
         return result
+
+FORECAST_EXPLANATION_SYSTEM_PROMPT = """You are a data analyst. You are given a user's forecasting question, \
+a summary of historical data, and a set of FUTURE PREDICTED values from a forecasting model.
+
+Write a short, clear explanation (2-4 sentences) in plain English describing what the forecast predicts.
+
+CRITICAL RULES:
+- Only describe the values under "Future predictions" as projections/forecasts.
+- Never describe historical values as if they were future predictions.
+- You may briefly reference the historical trend for context, but be explicit that it is past data.
+- Be specific with numbers and dates from the future predictions.
+- Do not mention SQL, tables, or column names literally — speak in natural business terms.
+"""
+
+
+def generate_forecast_explanation(
+    question: str,
+    historical: list[dict],
+    predictions: list[dict],
+    model_used: str,
+) -> str:
+    if not predictions:
+        return "No forecast could be generated for this question."
+
+    recent_history = historical[-6:] if len(historical) > 6 else historical
+
+    user_prompt = f"""Question: {question}
+
+Recent historical data (past, for context only):
+{json.dumps(recent_history, default=str)}
+
+Future predictions (model used: {model_used}):
+{json.dumps(predictions, default=str)}
+
+Explanation:"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": FORECAST_EXPLANATION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+    )
+
+    return response.choices[0].message.content.strip()

@@ -14,5 +14,7 @@ class Query(Base):
     chart_config = Column(JSON, nullable=True)
     chart_image_path = Column(String, nullable=True)
     explanation = Column(Text, nullable=True)
+    forecast_model_used = Column(String, nullable=True)
+    forecast_predictions = Column(JSON, nullable=True)
     error = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

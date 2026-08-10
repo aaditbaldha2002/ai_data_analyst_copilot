@@ -15,6 +15,8 @@ class QueryResult(BaseModel):
     chart_config: Optional[dict[str, Any]] = None
     chart_image_path: Optional[str] = None
     explanation: Optional[str] = None
+    forecast_model_used: Optional[str] = None
+    forecast_predictions: Optional[list[dict[str, Any]]] = None
     error: Optional[str] = None
     created_at: datetime
 
