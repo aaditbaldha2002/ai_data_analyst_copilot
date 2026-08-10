@@ -22,8 +22,15 @@ def infer_schema(file_path: str, ext: str) -> dict:
         df = pd.read_csv(file_path, nrows=1000)
     else:
         df = pd.read_excel(file_path, nrows=1000)
-    return {col: str(dtype) for col, dtype in df.dtypes.items()}
 
+    for col in df.columns:
+        if df[col].dtype == "object" or str(df[col].dtype) == "str":
+            try:
+                df[col] = pd.to_datetime(df[col], errors="raise")
+            except (ValueError, TypeError):
+                pass
+
+    return {col: str(dtype) for col, dtype in df.dtypes.items()}
 
 @router.post("/upload", response_model=DatasetOut)
 def upload_dataset(

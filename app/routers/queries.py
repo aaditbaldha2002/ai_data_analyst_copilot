@@ -9,6 +9,9 @@ from app.models.queries import Query
 from app.schemas.queries import QueryRequest, QueryResult
 from app.services.sql_agent import generate_sql
 from app.services.duckdb_engine import run_query
+from app.services.chart_agent import generate_chart_config
+from app.services.explanation_agent import generate_explanation
+from app.services.chart_renderer import render_chart
 
 router = APIRouter(prefix="/datasets", tags=["queries"])
 
@@ -32,9 +35,18 @@ def query_dataset(
 
     error = None
     result = None
+    chart_config = None
+    chart_image_path = None
+    explanation = None
+
     try:
         ext = os.path.splitext(dataset.file_path)[1].lower()
         result = run_query(dataset.file_path, ext, sql)
+
+        chart_config = generate_chart_config(request.question, result)
+        chart_image_path = render_chart(chart_config, result)
+        explanation = generate_explanation(request.question, result)
+
     except Exception as e:
         error = str(e)
 
@@ -44,6 +56,9 @@ def query_dataset(
         question=request.question,
         generated_sql=sql,
         result_json=result,
+        chart_config=chart_config,
+        chart_image_path=chart_image_path,
+        explanation=explanation,
         error=error,
     )
     db.add(query_record)

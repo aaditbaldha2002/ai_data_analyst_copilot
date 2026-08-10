@@ -2,7 +2,6 @@ from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, JSON, Text
 from sqlalchemy.sql import func
 from app.database import Base
 
-
 class Query(Base):
     __tablename__ = "queries"
 
@@ -12,5 +11,8 @@ class Query(Base):
     question = Column(Text, nullable=False)
     generated_sql = Column(Text, nullable=False)
     result_json = Column(JSON, nullable=True)
+    chart_config = Column(JSON, nullable=True)
+    chart_image_path = Column(String, nullable=True)
+    explanation = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -30,6 +30,10 @@ def run_query(file_path: str, ext: str, sql: str) -> list[dict]:
     else:
         df = pd.read_excel(file_path)
 
+    df = _parse_date_columns(df)
+    print("DEBUG dtypes after parsing:")
+    print(df.dtypes)
+
     con = duckdb.connect(database=":memory:")
     con.register("data", df)
 
@@ -39,3 +43,14 @@ def run_query(file_path: str, ext: str, sql: str) -> list[dict]:
         con.close()
 
     return result_df.to_dict(orient="records")
+
+
+def _parse_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    for col in df.columns:
+        if df[col].dtype == "object" or str(df[col].dtype) == "str":
+            try:
+                parsed = pd.to_datetime(df[col], errors="raise")
+                df[col] = parsed
+            except (ValueError, TypeError):
+                pass
+    return df

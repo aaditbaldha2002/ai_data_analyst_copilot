@@ -12,6 +12,9 @@ class QueryResult(BaseModel):
     question: str
     generated_sql: str
     result_json: Optional[list[dict[str, Any]]] = None
+    chart_config: Optional[dict[str, Any]] = None
+    chart_image_path: Optional[str] = None
+    explanation: Optional[str] = None
     error: Optional[str] = None
     created_at: datetime
 

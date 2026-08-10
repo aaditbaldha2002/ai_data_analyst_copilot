@@ -105,3 +105,6 @@ logs/
 # ---- OS ----
 .DS_Store
 desktop.ini
+
+# ---- Miscellaneous ----
+generated_charts/

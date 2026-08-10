@@ -11,9 +11,9 @@ Generate a single, valid DuckDB SQL query that answers the question.
 Rules:
 - Only generate SELECT statements. Never generate INSERT, UPDATE, DELETE, DROP, ALTER, or any other statement.
 - Only reference the table named "data".
+- This is DuckDB SQL. For date formatting, use strftime(column, format) — the DATE/TIMESTAMP column comes FIRST, the format string comes SECOND. Example: strftime(date_column, '%Y-%m').
 - Return ONLY the raw SQL query. No explanations, no markdown code fences, no commentary.
 """
-
 
 def generate_sql(question: str, schema: dict) -> str:
     schema_description = "\n".join(f"- {col}: {dtype}" for col, dtype in schema.items())
