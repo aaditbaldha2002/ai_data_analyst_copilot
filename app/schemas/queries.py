@@ -11,7 +11,7 @@ class QueryResult(BaseModel):
     id: int
     question: str
     generated_sql: str
-    result: Optional[list[dict[str, Any]]] = None
+    result_json: Optional[list[dict[str, Any]]] = None
     error: Optional[str] = None
     created_at: datetime
 
