@@ -31,8 +31,6 @@ def run_query(file_path: str, ext: str, sql: str) -> list[dict]:
         df = pd.read_excel(file_path)
 
     df = _parse_date_columns(df)
-    print("DEBUG dtypes after parsing:")
-    print(df.dtypes)
 
     con = duckdb.connect(database=":memory:")
     con.register("data", df)
@@ -42,8 +40,13 @@ def run_query(file_path: str, ext: str, sql: str) -> list[dict]:
     finally:
         con.close()
 
-    return result_df.to_dict(orient="records")
+    # Convert any datetime columns in the result to plain strings so downstream
+    # JSON serialization (Postgres JSON columns, FastAPI responses) never breaks.
+    for col in result_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(result_df[col]):
+            result_df[col] = result_df[col].astype(str)
 
+    return result_df.to_dict(orient="records")
 
 def _parse_date_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:

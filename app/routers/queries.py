@@ -8,17 +8,24 @@ from app.models.datasets import Dataset
 from app.models.queries import Query
 from app.schemas.queries import QueryRequest, QueryResult
 from app.services.anomaly_agent import detect_anomalies
-from app.services.sql_agent import generate_sql, generate_forecast_sql, generate_anomaly_sql
+from app.services.sql_agent import (
+    generate_sql,
+    generate_forecast_sql,
+    generate_anomaly_sql,
+    generate_root_cause_sql,
+)
 from app.services.duckdb_engine import run_query
 from app.services.chart_agent import generate_chart_config
 from app.services.explanation_agent import (
     generate_explanation,
     generate_forecast_explanation,
     generate_anomaly_explanation,
+    generate_root_cause_explanation,
 )
 from app.services.chart_renderer import render_chart
 from app.services.intent_agent import classify_intent
 from app.services.forecast_agent import generate_forecast, _identify_columns
+from app.services.root_cause_agent import analyze_root_cause
 
 router = APIRouter(prefix="/datasets", tags=["queries"])
 
@@ -44,6 +51,10 @@ def query_dataset(
         sql = generate_forecast_sql(request.question, dataset.schema_json)
     elif intent == "anomaly":
         sql = generate_anomaly_sql(request.question, dataset.schema_json)
+    elif intent == "root_cause":
+        rc_output = generate_root_cause_sql(request.question, dataset.schema_json)
+        sql = rc_output["sql"]
+        target_metric = rc_output["target_metric"]
     else:
         sql = generate_sql(request.question, dataset.schema_json)
 
@@ -56,6 +67,7 @@ def query_dataset(
     forecast_predictions = None
     anomaly_model_used = None
     anomaly_count = None
+    root_cause_analysis = None
 
     try:
         ext = os.path.splitext(dataset.file_path)[1].lower()
@@ -89,6 +101,13 @@ def query_dataset(
             chart_image_path = render_chart(chart_config, result)
             explanation = generate_anomaly_explanation(request.question, result)
 
+        elif intent == "root_cause":
+            analysis = analyze_root_cause(result, target_metric)
+            root_cause_analysis = analysis
+            explanation = generate_root_cause_explanation(request.question, analysis)
+            chart_config = None
+            chart_image_path = None
+            
         else:
             chart_config = generate_chart_config(request.question, result)
             chart_image_path = render_chart(chart_config, result)
@@ -110,6 +129,7 @@ def query_dataset(
         forecast_predictions=forecast_predictions,
         anomaly_model_used=anomaly_model_used,
         anomaly_count=anomaly_count,
+        root_cause_analysis=root_cause_analysis,
         error=error,
     )
     db.add(query_record)

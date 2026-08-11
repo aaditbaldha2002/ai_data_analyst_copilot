@@ -124,3 +124,46 @@ SQL query:"""
         if sql.lower().startswith("sql"):
             sql = sql[3:].strip()
     return sql
+
+import json  # add this import at the top if not already present
+
+ROOT_CAUSE_SQL_SYSTEM_PROMPT = """You are a SQL generation assistant. The user wants to understand WHY \
+a metric changed (e.g. dropped or increased) over some time period.
+
+Generate a SELECT query that returns ROW-LEVEL data (not aggregated) covering a reasonable window \
+around the period mentioned — include enough prior context to compare against (e.g. if the question \
+mentions April, include at least February through April so a before/after comparison is possible).
+
+Rules for the SQL:
+- Only generate SELECT statements.
+- Only reference the table named "data".
+- Do NOT aggregate with GROUP BY/SUM/AVG — return raw rows with all relevant columns.
+- Add LIMIT 2000 to keep this bounded.
+
+You must respond with ONLY a JSON object (no markdown, no commentary) in this exact shape:
+{
+  "sql": "<the raw SELECT query>",
+  "target_metric": "<the exact column name from the schema that represents the metric the user is asking about>"
+}
+"""
+
+
+def generate_root_cause_sql(question: str, schema: dict) -> dict:
+    schema_description = "\n".join(f"- {col}: {dtype}" for col, dtype in schema.items())
+    user_prompt = f"""Table columns:
+{schema_description}
+
+Question: {question}
+
+JSON:"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": ROOT_CAUSE_SQL_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+    return json.loads(response.choices[0].message.content)

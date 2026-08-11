@@ -18,5 +18,6 @@ class Query(Base):
     forecast_predictions = Column(JSON, nullable=True)
     anomaly_model_used = Column(String, nullable=True)
     anomaly_count = Column(Integer, nullable=True)
+    root_cause_analysis = Column(JSON, nullable=True)
     error = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

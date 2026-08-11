@@ -130,3 +130,34 @@ Explanation:"""
         temperature=0.3,
     )
     return response.choices[0].message.content.strip()
+
+ROOT_CAUSE_EXPLANATION_SYSTEM_PROMPT = """You are a data analyst explaining WHY a metric changed. \
+You are given correlation data, before/after group comparisons, and SHAP feature importance scores.
+
+Write a clear, 3-5 sentence explanation of the most likely drivers of the change, grounded ONLY in \
+the statistical evidence given. Mention the top 1-2 features by SHAP importance, and any notable \
+group shifts (e.g. which region/product/category changed most). Do not speculate beyond the data.
+"""
+
+def generate_root_cause_explanation(question: str, analysis: dict) -> str:
+    if analysis.get("error"):
+        return analysis["error"]
+
+    user_prompt = f"""Question: {question}
+
+Target metric: {analysis['target_metric']}
+Correlations with target: {json.dumps(analysis['correlations'])}
+Group average shifts (before vs after): {json.dumps(analysis['group_shifts'])}
+SHAP feature importance (higher = more influential): {json.dumps(analysis['feature_importance_shap'])}
+
+Explanation:"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": ROOT_CAUSE_EXPLANATION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+    )
+    return response.choices[0].message.content.strip()
