@@ -86,3 +86,41 @@ SQL query:"""
             sql = sql[3:].strip()
 
     return sql
+
+ANOMALY_SQL_SYSTEM_PROMPT = """You are a SQL generation assistant. The user wants to find unusual/anomalous \
+rows in their data. Generate a SELECT query that returns the RAW ROWS needed for anomaly detection — \
+do NOT aggregate (no GROUP BY, no SUM/AVG/COUNT) unless the user explicitly asks about a specific \
+aggregated metric being unusual.
+
+Rules:
+- Only generate SELECT statements.
+- Only reference the table named "data".
+- Prefer returning all relevant numeric and identifying columns so outliers can be detected across dimensions.
+- If the question mentions a specific column or subset, filter appropriately, otherwise select broadly.
+- Limit to at most 1000 rows (add LIMIT 1000) to keep this bounded.
+- Return ONLY the raw SQL query. No explanations, no markdown fences.
+"""
+
+def generate_anomaly_sql(question: str, schema: dict) -> str:
+    schema_description = "\n".join(f"- {col}: {dtype}" for col, dtype in schema.items())
+    user_prompt = f"""Table columns:
+{schema_description}
+
+Question: {question}
+
+SQL query:"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": ANOMALY_SQL_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0,
+    )
+    sql = response.choices[0].message.content.strip()
+    if sql.startswith("```"):
+        sql = sql.strip("`")
+        if sql.lower().startswith("sql"):
+            sql = sql[3:].strip()
+    return sql

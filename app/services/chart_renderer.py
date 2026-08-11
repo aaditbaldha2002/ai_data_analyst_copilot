@@ -14,7 +14,7 @@ def render_chart(chart_config: dict, result: list[dict]) -> str | None:
     y_key = chart_config.get("y_key")
     title = chart_config.get("title") or ""
 
-    if chart_type not in ("bar", "line", "pie") or not x_key or not y_key or not result:
+    if chart_type not in ("bar", "line", "pie","scatter") or not x_key or not y_key or not result:
         return None
 
     try:
@@ -37,6 +37,11 @@ def render_chart(chart_config: dict, result: list[dict]) -> str | None:
         plt.xticks(rotation=45, ha="right")
     elif chart_type == "pie":
         ax.pie(y_values, labels=x_values, autopct="%1.1f%%")
+    elif chart_type == "scatter":
+        colors = ["red" if row.get("is_anomaly") else "steelblue" for row in result]
+        ax.scatter(x_values, y_values, c=colors, alpha=0.7)
+        ax.set_xlabel(x_key)
+        ax.set_ylabel(y_key)
 
     ax.set_title(title)
     fig.tight_layout()

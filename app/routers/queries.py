@@ -7,17 +7,21 @@ from app.models.users import User
 from app.models.datasets import Dataset
 from app.models.queries import Query
 from app.schemas.queries import QueryRequest, QueryResult
-from app.services.sql_agent import generate_sql
+from app.services.anomaly_agent import detect_anomalies
+from app.services.sql_agent import generate_sql, generate_forecast_sql, generate_anomaly_sql
 from app.services.duckdb_engine import run_query
 from app.services.chart_agent import generate_chart_config
-from app.services.explanation_agent import generate_explanation
+from app.services.explanation_agent import (
+    generate_explanation,
+    generate_forecast_explanation,
+    generate_anomaly_explanation,
+)
 from app.services.chart_renderer import render_chart
 from app.services.intent_agent import classify_intent
-from app.services.sql_agent import generate_sql, generate_forecast_sql
 from app.services.forecast_agent import generate_forecast, _identify_columns
-from app.services.explanation_agent import generate_explanation, generate_forecast_explanation
 
 router = APIRouter(prefix="/datasets", tags=["queries"])
+
 
 @router.post("/{dataset_id}/query", response_model=QueryResult)
 def query_dataset(
@@ -35,8 +39,13 @@ def query_dataset(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     intent = classify_intent(request.question)
-    sql = generate_forecast_sql(request.question, dataset.schema_json) if intent == "forecast" \
-        else generate_sql(request.question, dataset.schema_json)
+
+    if intent == "forecast":
+        sql = generate_forecast_sql(request.question, dataset.schema_json)
+    elif intent == "anomaly":
+        sql = generate_anomaly_sql(request.question, dataset.schema_json)
+    else:
+        sql = generate_sql(request.question, dataset.schema_json)
 
     error = None
     result = None
@@ -45,6 +54,8 @@ def query_dataset(
     explanation = None
     forecast_model_used = None
     forecast_predictions = None
+    anomaly_model_used = None
+    anomaly_count = None
 
     try:
         ext = os.path.splitext(dataset.file_path)[1].lower()
@@ -66,7 +77,18 @@ def query_dataset(
             explanation = generate_forecast_explanation(
                 request.question, result, forecast_predictions, forecast_model_used
             )
-            
+
+        elif intent == "anomaly":
+            anomaly_result = detect_anomalies(result)
+            result = anomaly_result["rows"]
+            anomaly_model_used = anomaly_result["model_used"]
+            anomaly_count = anomaly_result["anomaly_count"]
+
+            chart_config = generate_chart_config(request.question, result)
+            chart_config["chart_type"] = "scatter"
+            chart_image_path = render_chart(chart_config, result)
+            explanation = generate_anomaly_explanation(request.question, result)
+
         else:
             chart_config = generate_chart_config(request.question, result)
             chart_image_path = render_chart(chart_config, result)
@@ -86,6 +108,8 @@ def query_dataset(
         explanation=explanation,
         forecast_model_used=forecast_model_used,
         forecast_predictions=forecast_predictions,
+        anomaly_model_used=anomaly_model_used,
+        anomaly_count=anomaly_count,
         error=error,
     )
     db.add(query_record)

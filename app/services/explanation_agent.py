@@ -100,3 +100,33 @@ Explanation:"""
     )
 
     return response.choices[0].message.content.strip()
+
+ANOMALY_EXPLANATION_SYSTEM_PROMPT = """You are a data analyst. Given a user's question and a set of rows \
+where some are flagged as anomalies (is_anomaly: true) and others are normal, write a short (2-4 sentence) \
+plain-English summary of what makes the anomalous rows unusual compared to the rest of the data.
+
+Only describe rows where is_anomaly is true as anomalies. Reference specific values where helpful.
+"""
+
+def generate_anomaly_explanation(question: str, rows: list[dict]) -> str:
+    anomalies = [r for r in rows if r.get("is_anomaly")]
+    if not anomalies:
+        return "No unusual data points were found."
+
+    sample = anomalies[:15]
+    user_prompt = f"""Question: {question}
+
+Anomalous rows found ({len(anomalies)} total, showing up to 15):
+{json.dumps(sample, default=str)}
+
+Explanation:"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": ANOMALY_EXPLANATION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+    )
+    return response.choices[0].message.content.strip()
