@@ -140,3 +140,55 @@ def query_dataset(
         raise HTTPException(status_code=400, detail={"sql": sql, "error": error})
 
     return query_record
+
+from app.services.graph import copilot_graph
+
+@router.post("/{dataset_id}/query-v2", response_model=QueryResult)
+def query_dataset_v2(
+    dataset_id: int,
+    request: QueryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dataset = (
+        db.query(Dataset)
+        .filter(Dataset.id == dataset_id, Dataset.owner_id == current_user.id)
+        .first()
+    )
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    ext = os.path.splitext(dataset.file_path)[1].lower()
+    initial_state = {
+        "question": request.question,
+        "schema": dataset.schema_json,
+        "file_path": dataset.file_path,
+        "ext": ext,
+    }
+
+    final_state = copilot_graph.invoke(initial_state)
+
+    query_record = Query(
+        dataset_id=dataset.id,
+        owner_id=current_user.id,
+        question=request.question,
+        generated_sql=final_state.get("sql", ""),
+        result_json=final_state.get("result"),
+        chart_config=final_state.get("chart_config"),
+        chart_image_path=final_state.get("chart_image_path"),
+        explanation=final_state.get("explanation"),
+        forecast_model_used=final_state.get("forecast_model_used"),
+        forecast_predictions=final_state.get("forecast_predictions"),
+        anomaly_model_used=final_state.get("anomaly_model_used"),
+        anomaly_count=final_state.get("anomaly_count"),
+        root_cause_analysis=final_state.get("root_cause_analysis"),
+        error=final_state.get("error"),
+    )
+    db.add(query_record)
+    db.commit()
+    db.refresh(query_record)
+
+    if final_state.get("error"):
+        raise HTTPException(status_code=400, detail={"sql": final_state.get("sql"), "error": final_state["error"]})
+
+    return query_record
