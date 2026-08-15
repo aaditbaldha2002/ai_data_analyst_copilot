@@ -4,9 +4,9 @@ services:
     image: postgres:16
     restart: always
     environment:
-      POSTGRES_USER: copilot
-      POSTGRES_PASSWORD: copilot
-      POSTGRES_DB: copilot_db
+      POSTGRES_USER: ${POSTGRES_DB_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_DB_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "5432:5432"
     volumes:

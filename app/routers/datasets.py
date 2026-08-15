@@ -1,36 +1,24 @@
 import os
 import uuid
-import pandas as pd
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
+
 from app.database import get_db
 from app.security import get_current_user
 from app.models.users import User
-from app.models.datasets import Dataset
+from app.models.datasets import Dataset, DatasetColumn
 from app.schemas.datasets import DatasetOut
+from app.dataset_ingestion import convert_to_parquet, build_dataset_column_rows
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
-UPLOAD_DIR = "uploaded_files"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+TMP_UPLOAD_DIR = "uploaded_files"  # transient landing spot only, pre-conversion
+os.makedirs(TMP_UPLOAD_DIR, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200MB — adjust to your needs
 
-
-def infer_schema(file_path: str, ext: str) -> dict:
-    if ext == ".csv":
-        df = pd.read_csv(file_path, nrows=1000)
-    else:
-        df = pd.read_excel(file_path, nrows=1000)
-
-    for col in df.columns:
-        if df[col].dtype == "object" or str(df[col].dtype) == "str":
-            try:
-                df[col] = pd.to_datetime(df[col], errors="raise")
-            except (ValueError, TypeError):
-                pass
-
-    return {col: str(dtype) for col, dtype in df.dtypes.items()}
 
 @router.post("/upload", response_model=DatasetOut)
 def upload_dataset(
@@ -42,26 +30,65 @@ def upload_dataset(
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only CSV and Excel files are supported")
 
-    unique_name = f"{uuid.uuid4().hex}{ext}"
-    file_path = os.path.join(UPLOAD_DIR, unique_name)
+    # Land the raw upload in a transient tmp path first
+    tmp_name = f"{uuid.uuid4().hex}{ext}"
+    tmp_path = os.path.join(TMP_UPLOAD_DIR, tmp_name)
 
-    with open(file_path, "wb") as f:
-        f.write(file.file.read())
+    size = 0
+    with open(tmp_path, "wb") as f:
+        while chunk := file.file.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                f.close()
+                os.remove(tmp_path)
+                raise HTTPException(status_code=413, detail="File too large")
+            f.write(chunk)
 
-    try:
-        schema = infer_schema(file_path, ext)
-    except Exception as e:
-        os.remove(file_path)
-        raise HTTPException(status_code=400, detail=f"Could not parse file: {e}")
-
+    # Insert a placeholder row first so we have a PK to key the dataset's
+    # storage directory off of (convert_to_parquet needs an id up front).
     dataset = Dataset(
         owner_id=current_user.id,
         filename=file.filename,
-        file_path=file_path,
-        schema_json=schema,
+        raw_file_path=tmp_path,  # temporary; overwritten below
     )
     db.add(dataset)
+    db.flush()  # populates dataset.id without committing yet
+
+    try:
+        schema = convert_to_parquet(str(dataset.id), tmp_path)
+    except Exception as e:
+        db.rollback()
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise HTTPException(status_code=400, detail=f"Could not parse file: {e}")
+
+    # Update the row with real paths + stats now that conversion succeeded
+    dataset.raw_file_path = str(_raw_copy_path(dataset.id, ext))
+    dataset.parquet_path = str(_parquet_path(dataset.id))
+    dataset.row_count = schema.row_count
+    dataset.content_hash = schema.content_hash
+
+    db.add_all(build_dataset_column_rows(schema, dataset.id, DatasetColumn))
+
     db.commit()
     db.refresh(dataset)
 
+    # tmp file was already copied into the dataset's own directory by
+    # convert_to_parquet; safe to clean up the transient copy
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
     return dataset
+
+
+def _dataset_dir(dataset_id: int):
+    from app.dataset_ingestion import DATA_ROOT
+    return DATA_ROOT / str(dataset_id)
+
+
+def _raw_copy_path(dataset_id: int, ext: str):
+    return _dataset_dir(dataset_id) / f"raw{ext}"
+
+
+def _parquet_path(dataset_id: int):
+    return _dataset_dir(dataset_id) / "data.parquet"
