@@ -1,3 +1,6 @@
+from typing_extensions import runtime
+
+from app.services.graph import GraphContext
 from app.services.intent_agent import classify_intent
 from app.services.sql_agent import generate_sql, generate_forecast_sql, generate_anomaly_sql, generate_root_cause_sql
 from app.services.duckdb_engine import run_query
@@ -11,12 +14,19 @@ from app.services.explanation_agent import (
     generate_anomaly_explanation, generate_root_cause_explanation,
 )
 from app.services.graph_state import GraphState
+from langgraph.runtime import Runtime
 
+def planner_node(state: GraphState,runtime: Runtime[GraphContext],) -> dict:
+    classification = classify_intent(
+            question=state["question"],
+            owner_id=state["owner_id"],
+            db=runtime.context.db,
+        )
 
-def planner_node(state: GraphState) -> dict:
-    intent = classify_intent(state["question"])
-    return {"intent": intent}
-
+    return {
+        "intent": classification["intent"],
+        "dataset_id": classification["dataset_id"],
+    }
 
 def _run(state: GraphState, sql: str) -> list[dict]:
     return run_query(state["file_path"], state["ext"], sql)

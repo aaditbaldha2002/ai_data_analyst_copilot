@@ -45,6 +45,8 @@ from app.services.anomaly_detection_agent.anomaly_explainer import (
 from app.services.anomaly_detection_agent.response_generator import (
     response_generator,
 )
+from app.services.graph_context import GraphContext
+
 
 
 def build_anomaly_graph():
@@ -55,7 +57,7 @@ def build_anomaly_graph():
     under the 'anomaly_task' node.
     """
 
-    builder = StateGraph(GraphState)
+    builder = StateGraph(GraphState,context_schema=GraphContext)
 
     # ========================================================
     # Nodes

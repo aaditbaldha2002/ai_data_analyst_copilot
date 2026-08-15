@@ -27,7 +27,7 @@ class Dataset(Base):
     # Canonical typed copy every agent reads from
     parquet_path = Column(String, nullable=True)
 
-    row_count = Column(Integer, nullable=True)
+    row_count = Column(Integer, nullable=True) #This can probably be removed as there will be a tool call to use pandas library to calculate the rows and other dataset metadata.
     content_hash = Column(String, nullable=True, index=True)
 
     # --- OPTION A (JSONB alternative) ---

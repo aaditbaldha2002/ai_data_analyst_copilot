@@ -1,11 +1,11 @@
 from typing import TypedDict, Optional, Any
+from sqlalchemy.orm import Session
 
 
 class GraphState(TypedDict, total=False):
     question: str
-    schema: dict
-    file_path: str
-    ext: str
+    owner_id: int
+    dataset_id: Optional[int]
 
     intent: str
     sql: str

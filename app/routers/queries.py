@@ -8,6 +8,7 @@ from app.models.datasets import Dataset
 from app.models.queries import Query
 from app.schemas.queries import QueryRequest, QueryResult
 from app.services.anomaly_agent import detect_anomalies
+from app.services.graph_context import GraphContext
 from app.services.sql_agent import (
     generate_sql,
     generate_forecast_sql,
@@ -145,31 +146,19 @@ from app.services.graph import copilot_graph
 
 @router.post("/{dataset_id}/query-v2", response_model=QueryResult)
 def query_dataset_v2(
-    dataset_id: int,
     request: QueryRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    dataset = (
-        db.query(Dataset)
-        .filter(Dataset.id == dataset_id, Dataset.owner_id == current_user.id)
-        .first()
-    )
-    if not dataset:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    ext = os.path.splitext(dataset.file_path)[1].lower()
     initial_state = {
         "question": request.question,
-        "schema": dataset.schema_json,
-        "file_path": dataset.file_path,
-        "ext": ext,
+        "owner_id": current_user.id,
     }
 
-    final_state = copilot_graph.invoke(initial_state)
+    final_state = copilot_graph.invoke(initial_state,context=GraphContext(db=db))
 
     query_record = Query(
-        dataset_id=dataset.id,
+        dataset_id=final_state.get("dataset_id"),
         owner_id=current_user.id,
         question=request.question,
         generated_sql=final_state.get("sql", ""),

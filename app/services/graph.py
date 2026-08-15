@@ -1,6 +1,10 @@
+from dataclasses import dataclass
+
 from langgraph.graph import StateGraph, START, END
+from sqlalchemy.orm import Session
 
 from app.services.anomaly_detection_agent.graph import build_anomaly_graph
+from app.services.graph_context import GraphContext
 from app.services.graph_state import GraphState
 from app.services.graph_nodes import (
     planner_node,
@@ -9,7 +13,6 @@ from app.services.graph_nodes import (
     root_cause_node,
     finalize_node,
 )
-
 
 
 # ============================================================
@@ -23,12 +26,15 @@ anomaly_graph = build_anomaly_graph()
 # MASTER GRAPH
 # ============================================================
 
-_builder = StateGraph(GraphState)
+_builder = StateGraph(
+    GraphState,
+    context_schema=GraphContext,
+)
 
 
-# ------------------------------------------------------------
-# Master-level nodes
-# ------------------------------------------------------------
+# ============================================================
+# MASTER-LEVEL NODES
+# ============================================================
 
 _builder.add_node(
     "planner",
@@ -123,7 +129,7 @@ _builder.add_edge(
 
 
 # ============================================================
-# COMPILE MASTER GRAPH
+# COMPILE
 # ============================================================
 
 copilot_graph = _builder.compile()
