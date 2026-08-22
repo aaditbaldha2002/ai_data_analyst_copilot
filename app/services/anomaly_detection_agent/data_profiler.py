@@ -1,66 +1,34 @@
-import os
 import json
 import numpy as np
 import pandas as pd
 from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
 from typing import Literal
+from langgraph.runtime import Runtime
 
 from app.services.graph_state import GraphState
-from app.database import SessionLocal
-from app.models.datasets import Dataset
+from app.services.graph_context import GraphContext
+from app.repositories.dataset_repository import DatasetRepository, DatasetNotFoundError
+from app.dataset_ingestion import DatasetSchema
 from app.config import settings
 
 client = OpenAI(api_key=settings.openai_api_key)
 
 
 # ---------------------------------------------------------------------------
-# Helpers (dtype/date detection — consistent with duckdb_engine.py conventions)
+# Helpers
 # ---------------------------------------------------------------------------
-
-def _is_stringlike_dtype(series: pd.Series) -> bool:
-    """True for pandas 3.0's new 'str' dtype as well as the legacy 'object' dtype."""
-    return series.dtype == "object" or str(series.dtype) == "str"
-
-
-def _looks_like_date(series: pd.Series) -> bool:
-    if pd.api.types.is_datetime64_any_dtype(series):
-        return True
-    if not _is_stringlike_dtype(series):
-        return False
-    sample = series.dropna().astype(str).iloc[:5]
-    if sample.empty:
-        return False
-    try:
-        pd.to_datetime(sample, errors="raise")
-        return True
-    except (ValueError, TypeError):
-        return False
-
-
-def _fetch_dataset_record(dataset_id: int) -> Dataset | None:
-    if not dataset_id:
-        return None
-    db = SessionLocal()
-    try:
-        return db.query(Dataset).filter(Dataset.id == dataset_id).first()
-    finally:
-        db.close()
-
-
-def _load_full_dataframe(file_path: str) -> pd.DataFrame:
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".csv":
-        df = pd.read_csv(file_path)
-    else:
-        df = pd.read_excel(file_path)
-
-    for column in df.columns:
-        if _looks_like_date(df[column]):
-            df[column] = pd.to_datetime(df[column], errors="coerce")
-
-    return df
-
+#
+# NOTE: date/dtype detection helpers that used to live here
+# (_is_stringlike_dtype, _looks_like_date) are gone. The dataframe now
+# comes from DatasetRepository.get_dataframe(), which reads the already-typed
+# Parquet file produced at ingestion — dates are already datetime64,
+# numerics are already numeric. Re-inferring types here would risk this
+# file's logic drifting out of sync with the centralized version in
+# dataset_ingestion.py (the exact bug class already found once with the
+# pandas 3.0 dtype=="object" issue). Column *kind* (numeric/categorical/
+# date/boolean/id/text) is read from the schema's `kind` tags instead of
+# being re-derived from dtypes here.
 
 def _evenly_sampled_records(df: pd.DataFrame, n: int = 10) -> list[dict]:
     """Picks n records spread evenly across the dataset (not just the head),
@@ -77,13 +45,25 @@ def _evenly_sampled_records(df: pd.DataFrame, n: int = 10) -> list[dict]:
     for col in sample_df.columns:
         if pd.api.types.is_datetime64_any_dtype(sample_df[col]):
             sample_df[col] = sample_df[col].astype(str)
-    return sample_df.where(pd.notnull(sample_df), None).to_dict(orient="records")
+
+    # NOTE: pandas 3.0's new "str" dtype silently defeats
+    # `.where(pd.notnull(df), None)` — the None assignment doesn't stick
+    # and null values stay as float NaN, which breaks JSON serialization
+    # downstream (NaN isn't valid JSON). Casting to object dtype first
+    # makes the None assignment actually take.
+    sample_df = sample_df.astype(object).where(pd.notnull(sample_df), None)
+    return sample_df.to_dict(orient="records")
 
 
 def _numeric_describe(df: pd.DataFrame, numeric_columns: list[str]) -> dict:
     if not numeric_columns:
         return {}
     desc = df[numeric_columns].describe().round(3)
+    # Same NaN -> None fix as _evenly_sampled_records: an entirely-null
+    # numeric column produces NaN for every stat, and json.dumps() on raw
+    # NaN emits invalid JSON tokens rather than erroring, so it would
+    # silently reach the LLM prompt malformed.
+    desc = desc.astype(object).where(pd.notnull(desc), None)
     return desc.to_dict()
 
 
@@ -98,8 +78,27 @@ def _categorical_cardinality(df: pd.DataFrame, categorical_columns: list[str], t
     return result
 
 
+def _possible_id_columns(df: pd.DataFrame, schema: DatasetSchema) -> list[str]:
+    """
+    Combines two signals rather than relying on either alone:
+      1. schema-derived kind="id" columns — catches high-cardinality string
+         columns (e.g. "customer_email") regardless of naming convention.
+      2. name-based heuristic — catches numeric sequential ID columns
+         (e.g. "row_id"), which the schema's kind detection classifies as
+         "numeric" rather than "id" since that check only runs on
+         non-numeric columns (see dataset_ingestion.py's _infer_column_kind).
+    Neither signal alone covers both cases, so both are kept.
+    """
+    schema_id_columns = set(schema.column_names("id"))
+    name_based = {
+        column for column in df.columns
+        if column.lower().endswith("_id") or column.lower() == "id"
+    }
+    return sorted(schema_id_columns | name_based)
+
+
 # ---------------------------------------------------------------------------
-# LLM judgment step
+# LLM judgment step (unchanged)
 # ---------------------------------------------------------------------------
 
 class DataProfileDecision(BaseModel):
@@ -117,6 +116,16 @@ class DataProfileDecision(BaseModel):
     final_grouping_columns: list[str] = Field(
         default_factory=list,
         description="Final chosen categorical columns to group/segment anomaly detection by, if any."
+    )
+    date_column: str | None = Field(
+        default=None,
+        description=(
+            "The single column that represents the time axis for this analysis, if the data is "
+            "meaningfully time-ordered and a datetime column exists in the schema. Null if the "
+            "dataset isn't a time series or has no usable datetime column. If multiple datetime "
+            "columns exist, choose the one that best represents when the observed event/metric "
+            "occurred (e.g. an order/transaction date over a signup/account-creation timestamp)."
+        )
     )
     suggested_analysis_dimension: Literal["univariate", "multivariate"]
     contamination_hint: float = Field(
@@ -147,6 +156,9 @@ Rules:
    in the samples and describe() statistics, not a default placeholder.
 5. Do not claim anomalies exist — you are configuring the pipeline, not detecting anomalies yourself.
 6. Do not perform detection calculations. Only reason and decide.
+7. date_column must be an actual datetime-typed column from the schema, or null. Only set it if the data \
+   is genuinely time-ordered in a way relevant to the anomaly objective — don't pick a date column just \
+   because one exists in the schema.
 
 Respond with ONLY a JSON object in this exact shape:
 {
@@ -154,6 +166,7 @@ Respond with ONLY a JSON object in this exact shape:
   "unmet_requirements": ["<requirement>", ...],
   "final_target_columns": ["<column>", ...],
   "final_grouping_columns": ["<column>", ...],
+  "date_column": "<column>" | null,
   "suggested_analysis_dimension": "univariate" | "multivariate",
   "contamination_hint": <float between 0.01 and 0.3>,
   "data_quality_concerns": ["<concern>", ...],
@@ -205,6 +218,14 @@ JSON:"""
     except (json.JSONDecodeError, ValidationError) as e:
         raise ValueError(f"Data profile decision returned invalid output: {e}\nRaw response: {raw}")
 
+    # Same hallucination guard used elsewhere in the pipeline (e.g.
+    # anomaly_problem_analyzer's column validation): never trust an
+    # LLM-picked column name without checking it's a real datetime-kind
+    # column in the schema.
+    valid_date_columns = {c["name"] for c in schema.get("columns", []) if c.get("kind") == "date"}
+    if parsed.date_column not in valid_date_columns:
+        parsed.date_column = None
+
     return parsed.model_dump()
 
 
@@ -212,75 +233,89 @@ JSON:"""
 # Main node
 # ---------------------------------------------------------------------------
 
-def data_profiler(graph: GraphState) -> GraphState:
+def data_profiler(graph: GraphState, runtime: Runtime[GraphContext]) -> dict:
     dataset_id = graph.get("dataset_id")
-    dataset = _fetch_dataset_record(dataset_id)
 
-    if not dataset:
+    if not dataset_id:
         return {
             "data_profile": {
                 "valid": False,
-                "warning": f"Could not find dataset record for dataset_id={dataset_id}.",
+                "warning": "No dataset_id present in graph state.",
             }
         }
 
-    df = _load_full_dataframe(dataset.file_path)
+    try:
+        db = runtime.context.db
+        repo = DatasetRepository(db)
+        try:
+            schema = repo.get_schema(dataset_id)      # dataset_columns table — single source of truth for column kinds
+            df = repo.get_dataframe(dataset_id)        # full width, per Option A — already-typed Parquet, no re-inference needed
+        except DatasetNotFoundError:
+            return {
+                "data_profile": {
+                    "valid": False,
+                    "warning": f"Could not find processed data for dataset_id={dataset_id}.",
+                }
+            }
 
-    if df.empty:
-        return {"data_profile": {"valid": False, "warning": "Dataset file is empty."}}
+        if df.empty:
+            return {"data_profile": {"valid": False, "warning": "Dataset file is empty."}}
 
-    numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist()
-    datetime_columns = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
-    categorical_columns = [
-        c for c in df.columns
-        if c not in numeric_columns and c not in datetime_columns
-        and (_is_stringlike_dtype(df[c]) or df[c].dtype == "bool")
-    ]
+        numeric_columns = schema.column_names("numeric")
+        datetime_columns = schema.column_names("date")
+        boolean_columns = schema.column_names("boolean")
+        categorical_columns = schema.column_names("categorical") + boolean_columns
 
-    missing_values = {
-        column: int(df[column].isna().sum())
-        for column in df.columns
-        if df[column].isna().any()
-    }
+        missing_values = {
+            column: int(df[column].isna().sum())
+            for column in df.columns
+            if df[column].isna().any()
+        }
 
-    possible_id_columns = [
-        column for column in df.columns
-        if column.lower().endswith("_id") or column.lower() == "id"
-    ]
+        possible_id_columns = _possible_id_columns(df, schema)
 
-    numeric_stats = _numeric_describe(df, numeric_columns)
-    categorical_cardinality = _categorical_cardinality(df, categorical_columns)
-    sample_records = _evenly_sampled_records(df, n=10)
+        numeric_stats = _numeric_describe(df, numeric_columns)
+        categorical_cardinality = _categorical_cardinality(df, categorical_columns)
+        sample_records = _evenly_sampled_records(df, n=10)
 
-    profile = {
-        "valid": True,
-        "row_count": len(df),
-        "column_count": len(df.columns),
-        "columns": df.columns.tolist(),
-        "numeric_columns": numeric_columns,
-        "categorical_columns": categorical_columns,
-        "datetime_columns": datetime_columns,
-        "missing_values": missing_values,
-        "possible_id_columns": possible_id_columns,
-        "numeric_stats": numeric_stats,
-        "categorical_cardinality": categorical_cardinality,
-        "sample_records": sample_records,
-    }
+        profile = {
+            "valid": True,
+            "row_count": len(df),
+            "column_count": len(df.columns),
+            "columns": df.columns.tolist(),
+            "numeric_columns": numeric_columns,
+            "categorical_columns": categorical_columns,
+            "datetime_columns": datetime_columns,
+            "boolean_columns": boolean_columns,
+            "missing_values": missing_values,
+            "possible_id_columns": possible_id_columns,
+            "numeric_stats": numeric_stats,
+            "categorical_cardinality": categorical_cardinality,
+            "sample_records": sample_records,
+        }
 
-    anomaly_problem = graph.get("anomaly_problem", {})
-    decision = None
-    if anomaly_problem:
-        decision = _decide_profile_configuration(
-            anomaly_problem=anomaly_problem,
-            schema=dataset.schema_json,
-            numeric_describe=numeric_stats,
-            categorical_cardinality=categorical_cardinality,
-            sample_records=sample_records,
-            row_count=len(df),
-        )
+        anomaly_problem = graph.get("anomaly_problem", {})
+        decision = None
+        if anomaly_problem:
+            decision = _decide_profile_configuration(
+                anomaly_problem=anomaly_problem,
+                schema=schema.to_dict(),
+                numeric_describe=numeric_stats,
+                categorical_cardinality=categorical_cardinality,
+                sample_records=sample_records,
+                row_count=len(df),
+            )
 
-    return {
-        "dataframe": df,
-        "data_profile": profile,
-        "profile_decision": decision,
-    }
+        # NOTE: the dataframe itself is deliberately NOT returned into
+        # graph state. State moves from node to node (and may be
+        # checkpointed by LangGraph between steps) — carrying a full
+        # dataframe through it adds memory overhead for no benefit, since
+        # any downstream node can re-fetch the same data cheaply via
+        # DatasetRepository.get_dataframe(dataset_id). Only dataset_id
+        # and JSON-safe results travel through state.
+        return {
+            "data_profile": profile,
+            "profile_decision": decision,
+        }
+    except Exception as e:
+        return {"error": str(e)}

@@ -1,9 +1,18 @@
 import json
+from typing import Optional
+
 from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
 from typing import Literal
+from sqlalchemy.orm import Session
+from langgraph.runtime import Runtime
+
 from app.services.graph_state import GraphState
+from app.services.graph_context import GraphContext
+from app.services.llm_tool_utils import call_llm_tool, LLMToolCallError
 from app.config import settings
+from app.models.datasets import Dataset
+from app.repositories.dataset_repository import DatasetRepository, DatasetNotFoundError
 
 client = OpenAI(api_key=settings.openai_api_key)
 
@@ -76,32 +85,153 @@ You must respond with ONLY a JSON object (no markdown, no commentary) in this ex
 """
 
 
-def anomaly_problem_analyzer(graph: GraphState) -> GraphState:
-    user_query = graph.get("user_query", "")
+# ---------------------------------------------------------------------------
+# Dataset resolution — cheap heuristic first, LLM fallback only if ambiguous
+# ---------------------------------------------------------------------------
 
-    if not user_query:
-        raise ValueError("Anomaly problem analyzer received an empty user query.")
+class _DatasetMatch(BaseModel):
+    dataset_id: Optional[int] = None
+    confidence: Literal["high", "medium", "low"] = "low"
 
-    # Dataset schema should ideally be populated before this node.
-    schema = graph.get("schema", {})
 
-    user_prompt = f"User request: {user_query}\n\nAvailable dataset schema: {schema}"
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0,
-        response_format={"type": "json_object"},
+def _list_user_datasets(db: Session, owner_id: int) -> list[dict]:
+    rows = (
+        db.query(Dataset)
+        .filter(Dataset.owner_id == owner_id, Dataset.parquet_path.isnot(None))
+        .order_by(Dataset.created_at.desc())
+        .all()
     )
+    return [{"id": r.id, "filename": r.filename, "row_count": r.row_count} for r in rows]
 
-    raw = response.choices[0].message.content
+
+def _heuristic_dataset_match(question: str, datasets: list[dict]) -> Optional[dict]:
+    q_lower = question.lower()
+    for d in datasets:
+        name_no_ext = d["filename"].rsplit(".", 1)[0].lower()
+        if name_no_ext and name_no_ext in q_lower:
+            return d
+    return None
+
+
+def _llm_dataset_match(question: str, datasets: list[dict]) -> Optional[int]:
+    system_prompt = (
+        "You are matching a user's data question to one of their uploaded datasets. "
+        "Call the submit_dataset_match tool with your answer. "
+        "Use null for dataset_id if no dataset is a plausible match."
+    )
+    user_prompt = f"User question: {question}\n\nAvailable datasets: {json.dumps(datasets)}"
 
     try:
-        parsed = AnomalyProblem.model_validate(json.loads(raw))
-    except (json.JSONDecodeError, ValidationError) as e:
-        raise ValueError(f"Anomaly problem analyzer returned invalid structured output: {e}\nRaw response: {raw}")
+        parsed = call_llm_tool(
+            client,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_model=_DatasetMatch,
+            tool_name="submit_dataset_match",
+            tool_description="Submit which dataset (by id) the user's question most likely refers to.",
+        )
+    except LLMToolCallError:
+        return None
 
-    return {"anomaly_problem": parsed.model_dump()}
+    if parsed.confidence == "low":
+        return None
+    return parsed.dataset_id
+
+
+def _resolve_dataset(db: Session, owner_id: int, question: str) -> Optional[dict]:
+    """
+    Returns {"id": ..., "filename": ..., "row_count": ...} for the dataset
+    this question most likely refers to, or None if it can't be resolved
+    (no datasets uploaded, or genuinely ambiguous with low LLM confidence).
+    """
+    datasets = _list_user_datasets(db, owner_id)
+    if not datasets:
+        return None
+    if len(datasets) == 1:
+        return datasets[0]
+
+    match = _heuristic_dataset_match(question, datasets)
+    if match:
+        return match
+
+    matched_id = _llm_dataset_match(question, datasets)
+    if matched_id is None:
+        return None
+
+    for d in datasets:
+        if d["id"] == matched_id:
+            return d
+    return None
+
+
+def anomaly_problem_analyzer(state: GraphState, runtime: Runtime[GraphContext]) -> dict:
+    """
+    Entry node of the anomaly subgraph.
+
+    1. Resolves which of the user's datasets the question refers to
+       (cheap filename-substring match first, LLM fallback if ambiguous).
+    2. Fetches that dataset's real schema via DatasetRepository — never
+       from a stale/legacy state field.
+    3. Asks the LLM to analyze the anomaly-detection objective (target
+       columns, grouping, temporal relevance, profiling requirements)
+       grounded in that real schema.
+
+    Uses the db session from GraphContext rather than opening its own —
+    the context exists specifically so nodes don't each manage their own
+    session lifecycle.
+
+    Returns {"error": ...} on failure rather than raising, consistent
+    with every other node in this pipeline — an uncaught exception here
+    would crash the whole graph run instead of letting finalize_node
+    handle it gracefully.
+    """
+    try:
+        question = state.get("question", "")
+        owner_id = state.get("owner_id")
+
+        if not question:
+            return {"error": "Anomaly problem analyzer received an empty question."}
+        if not owner_id:
+            return {"error": "No owner_id present in graph state."}
+
+        db = runtime.context.db
+
+        dataset = _resolve_dataset(db, owner_id, question)
+        if dataset is None:
+            return {"error": "Could not determine which dataset this question refers to."}
+
+        repo = DatasetRepository(db)
+        try:
+            schema = repo.get_schema(dataset["id"])
+        except DatasetNotFoundError:
+            return {"error": f"Dataset '{dataset['filename']}' has no processed data available."}
+
+        schema_dict = schema.to_dict()
+        user_prompt = f"User request: {question}\n\nAvailable dataset schema: {json.dumps(schema_dict)}"
+
+        try:
+            parsed = call_llm_tool(
+                client,
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                response_model=AnomalyProblem,
+                tool_name="submit_anomaly_problem",
+                tool_description="Submit the structured analysis of the user's anomaly-detection request.",
+            )
+        except LLMToolCallError as e:
+            return {"error": f"Anomaly problem analyzer returned invalid structured output: {e}"}
+
+        # Same hallucination guard used throughout the rest of this
+        # pipeline — the prompt already instructs the LLM not to invent
+        # column names, but a prompt instruction alone isn't a guarantee.
+        valid_columns = {c["name"] for c in schema_dict["columns"]}
+        problem = parsed.model_dump()
+        problem["target_columns"] = [c for c in problem["target_columns"] if c in valid_columns]
+        problem["grouping_columns"] = [c for c in problem["grouping_columns"] if c in valid_columns]
+
+        return {
+            "dataset_id": dataset["id"],
+            "anomaly_problem": problem,
+        }
+    except Exception as e:
+        return {"error": str(e)}
